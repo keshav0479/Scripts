@@ -298,14 +298,14 @@ function Test-DnsResolution {
 
 function Test-TcpPort {
     param(
-        [string]$Host,
+        [string]$Hostname,
         [int]$Port,
         [int]$TimeoutMs = 1500
     )
 
     try {
         $client = New-Object System.Net.Sockets.TcpClient
-        $asyncResult = $client.BeginConnect($Host, $Port, $null, $null)
+        $asyncResult = $client.BeginConnect($Hostname, $Port, $null, $null)
         $connected = $asyncResult.AsyncWaitHandle.WaitOne($TimeoutMs, $false)
         if (-not $connected) {
             $client.Close()
@@ -346,7 +346,7 @@ if (-not (Test-Connection -ComputerName $gateway -Count 1 -Quiet -ErrorAction Si
 Write-Status OK "LINK: Gateway reachable."
 
 $icmpOk = Test-Connection -ComputerName $TargetIcmp -Count 1 -Quiet -ErrorAction SilentlyContinue
-$tcpOk = Test-TcpPort -Host $TargetTcpHost -Port $TargetTcpPort -TimeoutMs 1500
+$tcpOk = Test-TcpPort -Hostname $TargetTcpHost -Port $TargetTcpPort -TimeoutMs 1500
 
 if ($icmpOk -or $tcpOk) {
     Write-Status OK "INTERNET: Reachability test passed."

@@ -25,8 +25,10 @@ bash net_check_unix.sh
 ### Windows (PowerShell)
 
 ```powershell
-.\net_check_win.ps1
+powershell -ExecutionPolicy Bypass -File .\net_check_win.ps1
 ```
+
+*Note: If you still get a security warning, you may need to run `Unblock-File -Path .\net_check_win.ps1` first.*
 
 You will get a clear `RESULT` and `NEXT STEP` so you know exactly what is wrong.
 
@@ -49,13 +51,13 @@ bash net_check_unix.sh --track AA:BB:CC:DD:EE:FF
 ### Windows
 
 ```powershell
-.\net_check_win.ps1 -Track
+powershell -ExecutionPolicy Bypass -File .\net_check_win.ps1 -Track
 ```
 
 Track a specific BSSID:
 
 ```powershell
-.\net_check_win.ps1 -Track -TrackMac AA:BB:CC:DD:EE:FF
+powershell -ExecutionPolicy Bypass -File .\net_check_win.ps1 -Track -TrackMac AA:BB:CC:DD:EE:FF
 ```
 
 ## Important Notes
