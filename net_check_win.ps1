@@ -2,17 +2,22 @@ param(
     [switch]$NoColor,
     [switch]$NoPauseAtEnd,
     [string]$CampusGatewayRegex = $env:NETCHECK_CAMPUS_GATEWAY_REGEX,
-    [string]$DnsTestDomain = $(if ($env:NETCHECK_DNS_TEST_DOMAIN) { $env:NETCHECK_DNS_TEST_DOMAIN } else { "google.com" })
+    [string]$DnsTestDomain = $(if ($env:NETCHECK_DNS_TEST_DOMAIN) { $env:NETCHECK_DNS_TEST_DOMAIN } else { "google.com" }),
+    [switch]$Track,
+    [string]$TrackMac = $(if ($env:NETCHECK_TRACK_TARGET) { $env:NETCHECK_TRACK_TARGET } else { "" }),
+    [double]$TrackIntervalSeconds = 2
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$ScriptVersion = "2.1"
+$ScriptVersion = "2.2"
 $TargetIcmp = "8.8.8.8"
 $TargetTcpHost = "1.1.1.1"
 $TargetTcpPort = 443
 $MaxHops = 4
+$TrackWindow = 5
+$TrackMinStep = 3
 
 function Pause-IfNeeded {
     if ($NoPauseAtEnd) {
@@ -94,6 +99,151 @@ function Test-PersonalRouterGateway {
     return ($commonRouters -contains $Gateway)
 }
 
+function Normalize-Mac {
+    param(
+        [string]$Mac
+    )
+
+    if (-not $Mac) {
+        return $null
+    }
+
+    $clean = $Mac.Trim().ToUpper().Replace("-", ":")
+    if ($clean -match "^([0-9A-F]{2}:){5}[0-9A-F]{2}$") {
+        return $clean
+    }
+    return $null
+}
+
+function Get-ConnectedBssid {
+    if (-not (Get-Command netsh -ErrorAction SilentlyContinue)) {
+        return $null
+    }
+
+    $output = netsh wlan show interfaces 2>$null
+    foreach ($line in $output) {
+        if ($line -match "^\s*BSSID\s*:\s*([0-9A-Fa-f:-]{17})\s*$") {
+            return (Normalize-Mac -Mac $matches[1])
+        }
+    }
+    return $null
+}
+
+function Get-SignalForBssid {
+    param(
+        [string]$TargetMac
+    )
+
+    $normalized = Normalize-Mac -Mac $TargetMac
+    if (-not $normalized) {
+        return $null
+    }
+
+    $scan = netsh wlan show networks mode=bssid 2>$null
+    $lines = $scan -split "`n"
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match "^\s*BSSID\s+\d+\s*:\s*([0-9A-Fa-f:-]{17})\s*$") {
+            $candidate = Normalize-Mac -Mac $matches[1]
+            if ($candidate -ne $normalized) {
+                continue
+            }
+
+            for ($j = 1; $j -le 6 -and ($i + $j) -lt $lines.Count; $j++) {
+                if ($lines[$i + $j] -match "^\s*Signal\s*:\s*(\d+)%\s*$") {
+                    return [int]$matches[1]
+                }
+            }
+        }
+    }
+
+    return $null
+}
+
+function Start-WifiTracker {
+    param(
+        [string]$Target,
+        [double]$IntervalSeconds
+    )
+
+    if (-not (Get-Command netsh -ErrorAction SilentlyContinue)) {
+        Write-ResultAndExit -Code 52 -Level FAIL -Summary "Wi-Fi tracker requires netsh, but netsh is missing." -NextStep "Run this on standard Windows with WLAN tools enabled."
+    }
+
+    if ($IntervalSeconds -lt 1) {
+        Write-Status WARN "Windows Wi-Fi scanning is throttled. Using 1 second minimum interval."
+        $IntervalSeconds = 1
+    }
+
+    $normalizedTarget = Normalize-Mac -Mac $Target
+    if (-not $normalizedTarget) {
+        $normalizedTarget = Get-ConnectedBssid
+    }
+
+    if (-not $normalizedTarget) {
+        Write-ResultAndExit -Code 53 -Level FAIL -Summary "No tracker target selected." -NextStep "Run with -Track -TrackMac AA:BB:CC:DD:EE:FF or connect to target Wi-Fi first."
+    }
+
+    Write-Status INFO ("TRACKER: Monitoring BSSID {0}" -f $normalizedTarget)
+    Write-Status INFO ("TRACKER: Sampling every {0}s (moving avg window: {1}, step threshold: {2})" -f $IntervalSeconds, $TrackWindow, $TrackMinStep)
+    Write-Status INFO "TRACKER: Press Ctrl+C to stop."
+
+    $samples = New-Object System.Collections.Generic.List[int]
+    $previousAverage = $null
+    $trendState = "STABLE"
+    $trendStreak = 0
+
+    while ($true) {
+        $signal = Get-SignalForBssid -TargetMac $normalizedTarget
+        if ($null -eq $signal) {
+            Write-Host ("`r[WARN] Signal not visible for {0}. Move and rescan...                     " -f $normalizedTarget) -NoNewline
+            Start-Sleep -Milliseconds ([Math]::Round($IntervalSeconds * 1000))
+            continue
+        }
+
+        [void]$samples.Add([int]$signal)
+        while ($samples.Count -gt $TrackWindow) {
+            $samples.RemoveAt(0)
+        }
+
+        $sum = 0
+        foreach ($sample in $samples) {
+            $sum += $sample
+        }
+        $average = [int][Math]::Round($sum / $samples.Count)
+        $direction = "STABLE"
+        $hint = "HOLD"
+
+        if ($null -ne $previousAverage) {
+            $delta = $average - $previousAverage
+            if ($delta -ge $TrackMinStep) {
+                $direction = "CLOSER"
+            } elseif ($delta -le (-1 * $TrackMinStep)) {
+                $direction = "AWAY"
+            }
+        }
+
+        if ($direction -eq $trendState -and $direction -ne "STABLE") {
+            $trendStreak++
+        } else {
+            $trendState = $direction
+            $trendStreak = 1
+        }
+
+        if ($direction -eq "CLOSER" -and $trendStreak -ge 2) {
+            $hint = "MOVING CLOSER"
+        } elseif ($direction -eq "AWAY" -and $trendStreak -ge 2) {
+            $hint = "MOVING AWAY"
+        }
+
+        $barLen = [Math]::Min([Math]::Floor($signal / 2), 50)
+        $bar = ("#" * $barLen).PadRight(50, " ")
+        Write-Host ("`rSignal: [{0}] {1,3}%  Avg:{2,3}%  Trend:{3,-13} Target:{4}" -f $bar, $signal, $average, $hint, $normalizedTarget) -NoNewline
+
+        $previousAverage = $average
+        Start-Sleep -Milliseconds ([Math]::Round($IntervalSeconds * 1000))
+    }
+}
+
 function Get-DefaultGateway {
     try {
         $route = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction Stop |
@@ -172,6 +322,12 @@ function Test-TcpPort {
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ("   WINDOWS NETWORK DIAGNOSTICS v{0}" -f $ScriptVersion) -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
+
+if ($Track) {
+    Start-WifiTracker -Target $TrackMac -IntervalSeconds $TrackIntervalSeconds
+    Write-Host ""
+    Exit-Script 0
+}
 
 $gateway = Get-DefaultGateway
 if (-not $gateway) {

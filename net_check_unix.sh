@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-SCRIPT_VERSION="2.1"
+SCRIPT_VERSION="2.2"
 TARGET_ICMP="8.8.8.8"
 TARGET_TCP_HOST="1.1.1.1"
 TARGET_TCP_PORT="443"
@@ -10,29 +10,70 @@ AUTO_INSTALL="${NETCHECK_AUTO_INSTALL:-0}"
 PAUSE_AT_END="${NETCHECK_PAUSE_AT_END:-1}"
 CAMPUS_GATEWAY_REGEX="${NETCHECK_CAMPUS_GATEWAY_REGEX:-}"
 DNS_TEST_DOMAIN="${NETCHECK_DNS_TEST_DOMAIN:-google.com}"
+TRACK_MODE=0
+TRACK_TARGET="${NETCHECK_TRACK_TARGET:-}"
+TRACK_INTERVAL="${NETCHECK_TRACK_INTERVAL:-2}"
+TRACK_WINDOW="${NETCHECK_TRACK_WINDOW:-5}"
+TRACK_MIN_STEP="${NETCHECK_TRACK_MIN_STEP:-3}"
 OS_NAME="$(uname -s)"
 TRACE_MODE=""
 ROUTER_SUSPECT=0
 
-for arg in "$@"; do
-    case "$arg" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --no-pause) PAUSE_AT_END="0" ;;
         --pause) PAUSE_AT_END="1" ;;
         --auto-install) AUTO_INSTALL="1" ;;
         --no-auto-install) AUTO_INSTALL="0" ;;
+        --track)
+            TRACK_MODE=1
+            if [[ $# -gt 1 && "$2" != --* ]]; then
+                TRACK_TARGET="$2"
+                shift
+            fi
+            ;;
+        --track-target)
+            TRACK_MODE=1
+            if [[ $# -lt 2 ]]; then
+                printf "Missing value for --track-target\n"
+                exit 2
+            fi
+            TRACK_TARGET="$2"
+            shift
+            ;;
+        --track-interval)
+            TRACK_MODE=1
+            if [[ $# -lt 2 ]]; then
+                printf "Missing value for --track-interval\n"
+                exit 2
+            fi
+            TRACK_INTERVAL="$2"
+            shift
+            ;;
         -h|--help)
             cat <<'EOF'
-Usage: netcheck.sh [--pause|--no-pause] [--auto-install|--no-auto-install]
+Usage: net_check_unix.sh [--pause|--no-pause] [--auto-install|--no-auto-install]
+       net_check_unix.sh --track [BSSID]
+       net_check_unix.sh --track-target BSSID [--track-interval 2]
 Environment:
   NETCHECK_AUTO_INSTALL=1    Enable trace-tool auto install (default: 0)
   NETCHECK_PAUSE_AT_END=0    Disable pause before window close
   NETCHECK_DNS_TEST_DOMAIN   DNS test domain (default: google.com)
   NETCHECK_CAMPUS_GATEWAY_REGEX
                             Regex for known campus gateway range
+  NETCHECK_TRACK_TARGET      BSSID to track (AA:BB:CC:DD:EE:FF)
+  NETCHECK_TRACK_INTERVAL    Tracker sampling interval (default: 2 sec)
+  NETCHECK_TRACK_WINDOW      Moving average window size (default: 5)
+  NETCHECK_TRACK_MIN_STEP    Minimum avg delta for trend (default: 3)
 EOF
             exit 0
             ;;
+        *)
+            printf "Unknown option: %s\nUse --help for usage.\n" "$1"
+            exit 2
+            ;;
     esac
+    shift
 done
 
 pause_before_exit() {
@@ -117,6 +158,30 @@ install_traceroute_linux() {
     fi
 }
 
+install_nmcli_linux() {
+    if ! command -v sudo >/dev/null 2>&1; then
+        status WARN "Missing sudo. Cannot auto-install nmcli."
+        return 1
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get install -y network-manager >/dev/null 2>&1
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf -y install NetworkManager >/dev/null 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+        sudo yum -y install NetworkManager >/dev/null 2>&1
+    elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -Sy --noconfirm networkmanager >/dev/null 2>&1
+    elif command -v zypper >/dev/null 2>&1; then
+        sudo zypper --non-interactive install NetworkManager >/dev/null 2>&1
+    elif command -v apk >/dev/null 2>&1; then
+        sudo apk add networkmanager >/dev/null 2>&1
+    else
+        status WARN "Unsupported package manager. Install NetworkManager/nmcli manually."
+        return 1
+    fi
+}
+
 ensure_trace_tool() {
     if command -v traceroute >/dev/null 2>&1; then
         TRACE_MODE="traceroute"
@@ -142,6 +207,160 @@ ensure_trace_tool() {
     fi
 
     return 1
+}
+
+ensure_nmcli_tool() {
+    if command -v nmcli >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [[ "$OS_NAME" == "Linux" && "$AUTO_INSTALL" == "1" ]]; then
+        status INFO "nmcli missing. Attempting automatic install."
+        install_nmcli_linux || return 1
+        command -v nmcli >/dev/null 2>&1
+        return $?
+    fi
+
+    return 1
+}
+
+normalize_mac() {
+    local input="${1^^}"
+    input="${input//-/:}"
+    if [[ "$input" =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]]; then
+        printf "%s" "$input"
+        return 0
+    fi
+    return 1
+}
+
+connected_bssid() {
+    nmcli -t -f ACTIVE,BSSID dev wifi list 2>/dev/null |
+        awk -F: '$1 == "yes" {print toupper($2 ":" $3 ":" $4 ":" $5 ":" $6 ":" $7); exit}'
+}
+
+signal_for_bssid() {
+    local target="$1"
+    nmcli -t -f BSSID,SIGNAL dev wifi list --rescan yes 2>/dev/null |
+        awk -F: -v mac="$target" '
+            {
+                b=toupper($1 ":" $2 ":" $3 ":" $4 ":" $5 ":" $6)
+                if (b == mac && $7 ~ /^[0-9]+$/) {
+                    print $7
+                    exit
+                }
+            }'
+}
+
+start_wifi_tracker() {
+    local target="${TRACK_TARGET:-}"
+    local interval="$TRACK_INTERVAL"
+    local window="$TRACK_WINDOW"
+    local min_step="$TRACK_MIN_STEP"
+
+    if [[ "$OS_NAME" != "Linux" ]]; then
+        result_and_exit 51 FAIL "Wi-Fi tracking mode is currently supported only on Linux in this script." "Use the Windows tracker mode in net_check_win.ps1 on Windows."
+    fi
+
+    if ! ensure_nmcli_tool; then
+        result_and_exit 52 FAIL "Wi-Fi tracking needs nmcli (NetworkManager)." "Install NetworkManager or rerun with --auto-install."
+    fi
+
+    if [[ "$interval" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk "BEGIN {exit !($interval > 0)}"; then
+        :
+    else
+        interval="2"
+    fi
+
+    if [[ ! "$window" =~ ^[0-9]+$ || "$window" -lt 3 ]]; then
+        window="5"
+    fi
+
+    if [[ ! "$min_step" =~ ^[0-9]+$ || "$min_step" -lt 1 ]]; then
+        min_step="3"
+    fi
+
+    if [[ -z "$target" ]]; then
+        target="$(connected_bssid)"
+    fi
+
+    if [[ -z "$target" ]]; then
+        result_and_exit 53 FAIL "No tracker target selected." "Pass BSSID: --track AA:BB:CC:DD:EE:FF or connect to the target Wi-Fi first."
+    fi
+
+    target="$(normalize_mac "$target" 2>/dev/null || true)"
+    if [[ -z "$target" ]]; then
+        result_and_exit 54 FAIL "Invalid MAC/BSSID format for tracker target." "Use format AA:BB:CC:DD:EE:FF."
+    fi
+
+    status INFO "TRACKER: Monitoring BSSID $target"
+    status INFO "TRACKER: Sampling every ${interval}s (moving avg window: ${window}, step threshold: ${min_step})"
+    status INFO "TRACKER: Ctrl+C to stop."
+
+    local -a samples=()
+    local prev_avg=""
+    local trend_state="STABLE"
+    local trend_streak=0
+
+    while true; do
+        local sig
+        sig="$(signal_for_bssid "$target")"
+
+        if [[ -z "$sig" ]]; then
+            printf "\r\033[K[WARN] Signal not visible for %s. Move and rescan..." "$target"
+            sleep "$interval"
+            continue
+        fi
+
+        samples+=("$sig")
+        if (( ${#samples[@]} > window )); then
+            samples=("${samples[@]:1}")
+        fi
+
+        local sum=0
+        local value
+        for value in "${samples[@]}"; do
+            ((sum += value))
+        done
+        local avg=$((sum / ${#samples[@]}))
+        local direction="STABLE"
+        local hint="HOLD"
+
+        if [[ -n "$prev_avg" ]]; then
+            local delta=$((avg - prev_avg))
+            if (( delta >= min_step )); then
+                direction="CLOSER"
+            elif (( delta <= -min_step )); then
+                direction="AWAY"
+            fi
+        fi
+
+        if [[ "$direction" == "$trend_state" && "$direction" != "STABLE" ]]; then
+            ((trend_streak += 1))
+        else
+            trend_state="$direction"
+            trend_streak=1
+        fi
+
+        if [[ "$direction" == "CLOSER" && "$trend_streak" -ge 2 ]]; then
+            hint="MOVING CLOSER"
+        elif [[ "$direction" == "AWAY" && "$trend_streak" -ge 2 ]]; then
+            hint="MOVING AWAY"
+        fi
+
+        local bar_len=$((sig / 2))
+        if (( bar_len > 50 )); then
+            bar_len=50
+        fi
+        local bar
+        bar="$(printf '%*s' "$bar_len" '' | tr ' ' '#')"
+        local empty
+        empty="$(printf '%*s' "$((50 - bar_len))" '')"
+
+        printf "\r\033[KSignal: [%-50s] %3s%%  Avg:%3s%%  Trend:%-13s Target:%s" "${bar}${empty}" "$sig" "$avg" "$hint" "$target"
+        prev_avg="$avg"
+        sleep "$interval"
+    done
 }
 
 looks_like_personal_router() {
@@ -266,6 +485,11 @@ classify_trace() {
 
     return 20
 }
+
+if [[ "$TRACK_MODE" == "1" ]]; then
+    print_banner
+    start_wifi_tracker
+fi
 
 print_banner
 
