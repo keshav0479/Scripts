@@ -422,6 +422,22 @@ detect_gateway() {
     printf "%s" "$gw"
 }
 
+check_physical_link_no_ip() {
+    if command -v ip >/dev/null 2>&1; then
+        if ip link show 2>/dev/null | grep -v "lo:" | grep -q "state UP"; then
+            return 0
+        fi
+    fi
+
+    if command -v ifconfig >/dev/null 2>&1; then
+        if ifconfig -u 2>/dev/null | grep -v "^lo" | grep -q "status: active"; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 ping_once() {
     local host="$1"
     case "$OS_NAME" in
@@ -499,6 +515,9 @@ fi
 
 GW="$(detect_gateway)"
 if [[ -z "$GW" ]]; then
+    if check_physical_link_no_ip; then
+        result_and_exit 15 FAIL "Cable connected, but no IP address received from network." "This wall port is likely disabled (dead) or blocked by CCN. Try a different port if that doesn't work fill complaint form."
+    fi
     result_and_exit 10 FAIL "No active network connection found." "Connect to campus Wi-Fi or Ethernet, then run again."
 fi
 status OK "LOCAL: Connected. Gateway: $GW"

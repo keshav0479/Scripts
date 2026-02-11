@@ -331,6 +331,14 @@ if ($Track) {
 
 $gateway = Get-DefaultGateway
 if (-not $gateway) {
+    if (Get-Command Get-NetAdapter -ErrorAction SilentlyContinue) {
+        try {
+            $up = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" }
+            if ($up) {
+                Write-ResultAndExit -Code 15 -Level FAIL -Summary "Cable connected, but no IP address received from network." -NextStep "This wall port is likely disabled (dead) or blocked by CCN. Try a different port if that doesn't work fill complaint form."
+            }
+        } catch {}
+    }
     Write-ResultAndExit -Code 10 -Level FAIL -Summary "No active network connection found." -NextStep "Connect to campus Wi-Fi or Ethernet, then run again."
 }
 Write-Status OK ("LOCAL: Connected. Gateway: {0}" -f $gateway)
