@@ -372,6 +372,13 @@ looks_like_personal_router() {
         fi
     fi
 
+    if [[ "$gw" =~ ^192\.168\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        return 0
+    fi
+    if [[ "$gw" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        return 0
+    fi
+
     case "$gw" in
         192.168.0.1|192.168.1.1|192.168.50.1|10.0.0.1|10.0.1.1) return 0 ;;
         *) return 1 ;;
@@ -524,7 +531,7 @@ status OK "LOCAL: Connected. Gateway: $GW"
 
 if looks_like_personal_router "$GW"; then
     ROUTER_SUSPECT=1
-    status WARN "Gateway looks like a personal router ($GW). Check WAN cable to wall port."
+    status WARN "Gateway looks like a personal router path ($GW). Check uplink/WAN connection."
 fi
 
 if ! ping_once "$GW"; then
@@ -546,6 +553,9 @@ if [[ $icmp_ok -eq 1 || $tcp_ok -eq 1 ]]; then
     if [[ $icmp_ok -eq 0 && $tcp_ok -eq 1 ]]; then
         status WARN "ICMP appears filtered, but TCP/443 is working."
     fi
+    if [[ $ROUTER_SUSPECT -eq 1 ]]; then
+        status WARN "Traffic is passing through a personal router gateway."
+    fi
 
     check_dns "$DNS_TEST_DOMAIN"
     dns_rc=$?
@@ -557,6 +567,9 @@ if [[ $icmp_ok -eq 1 || $tcp_ok -eq 1 ]]; then
 fi
 
 status WARN "INTERNET: Public reachability failed. Running quick path check."
+if [[ $ROUTER_SUSPECT -eq 1 ]]; then
+    status WARN "Personal router path suspected. Verifying whether failure is local uplink vs upstream."
+fi
 if ! ensure_trace_tool; then
     if [[ $ROUTER_SUSPECT -eq 1 ]]; then
         result_and_exit 30 FAIL "Your router responds, but internet is still down." "Check the router WAN cable to wall port and router internet settings."
@@ -582,6 +595,9 @@ case "$trace_rc" in
         result_and_exit 21 FAIL "Local gateway works, but campus/backend uplink may be down." "Report this to CCN and fill complaint form."
         ;;
     *)
+        if [[ $ROUTER_SUSPECT -eq 1 ]]; then
+            result_and_exit 22 WARN "Personal router detected. Issue is likely on that router uplink or its upstream path." "Bypass router once, then reconnect WAN/uplink and test again."
+        fi
         result_and_exit 22 WARN "Local network is okay; issue is likely upstream (ISP/remote service)." "Wait a bit or try another external site."
         ;;
 esac

@@ -95,6 +95,13 @@ function Test-PersonalRouterGateway {
         }
     }
 
+    if ($Gateway -match "^192\.168\.\d{1,3}\.\d{1,3}$") {
+        return $true
+    }
+    if ($Gateway -match "^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$") {
+        return $true
+    }
+
     $commonRouters = @("192.168.0.1", "192.168.1.1", "192.168.50.1", "10.0.0.1", "10.0.1.1")
     return ($commonRouters -contains $Gateway)
 }
@@ -345,7 +352,7 @@ Write-Status OK ("LOCAL: Connected. Gateway: {0}" -f $gateway)
 
 $routerSuspect = Test-PersonalRouterGateway -Gateway $gateway -CampusRegex $CampusGatewayRegex
 if ($routerSuspect) {
-    Write-Status WARN ("Gateway looks like a personal router ({0}). Check WAN cable to wall port." -f $gateway)
+    Write-Status WARN ("Gateway looks like a personal router path ({0}). Check uplink/WAN connection." -f $gateway)
 }
 
 if (-not (Test-Connection -ComputerName $gateway -Count 1 -Quiet -ErrorAction SilentlyContinue)) {
@@ -361,6 +368,9 @@ if ($icmpOk -or $tcpOk) {
     if (-not $icmpOk -and $tcpOk) {
         Write-Status WARN "ICMP appears filtered, but TCP/443 is working."
     }
+    if ($routerSuspect) {
+        Write-Status WARN "Traffic is passing through a personal router gateway."
+    }
 
     $dnsState = Test-DnsResolution -Domain $DnsTestDomain
     switch ($dnsState) {
@@ -371,6 +381,9 @@ if ($icmpOk -or $tcpOk) {
 }
 
 Write-Status WARN "INTERNET: Public reachability failed. Running quick path check."
+if ($routerSuspect) {
+    Write-Status WARN "Personal router path suspected. Verifying whether failure is local uplink vs upstream."
+}
 if (-not (Get-Command tracert -ErrorAction SilentlyContinue)) {
     if ($routerSuspect) {
         Write-ResultAndExit -Code 30 -Level FAIL -Summary "Your router responds, but internet is still down." -NextStep "Check WAN cable to wall port and router internet settings."
@@ -396,4 +409,7 @@ if (-not $hop2 -or $hop2 -match "\*\s+\*\s+\*") {
     Write-ResultAndExit -Code 21 -Level FAIL -Summary "Local gateway works, but campus/backend uplink may be down." -NextStep "Report this to CCN and fill complaint form."
 }
 
+if ($routerSuspect) {
+    Write-ResultAndExit -Code 22 -Level WARN -Summary "Personal router detected. Issue is likely on that router uplink or its upstream path." -NextStep "Bypass router once, then reconnect WAN/uplink and test again."
+}
 Write-ResultAndExit -Code 22 -Level WARN -Summary "Local network is okay; issue is likely upstream (ISP/remote service)." -NextStep "Wait a bit or try another external site."
