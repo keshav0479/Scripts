@@ -561,7 +561,7 @@ if ! ensure_trace_tool; then
     if [[ $ROUTER_SUSPECT -eq 1 ]]; then
         result_and_exit 30 FAIL "Your router responds, but internet is still down." "Check the router WAN cable to wall port and router internet settings."
     fi
-    result_and_exit 30 FAIL "Gateway responds, but internet is still down." "Likely room uplink or campus backend issue. Contact campus IT."
+    result_and_exit 30 FAIL "Gateway responds, but internet is still down." "Likely room uplink or campus backend issue. Contact CCN and fill complaint form."
 fi
 
 TRACE_OUTPUT="$(run_trace)"
@@ -579,7 +579,7 @@ case "$trace_rc" in
         if [[ $ROUTER_SUSPECT -eq 1 ]]; then
             result_and_exit 21 FAIL "Your router is reachable, but its uplink likely has a problem." "Reconnect WAN cable from router to wall and test again."
         fi
-        result_and_exit 21 FAIL "Local gateway works, but campus/backend uplink may be down." "Report this to campus IT with this result."
+        result_and_exit 21 FAIL "Local gateway works, but campus/backend uplink may be down." "Report this to CCN and fill complaint form."
         ;;
     *)
         result_and_exit 22 WARN "Local network is okay; issue is likely upstream (ISP/remote service)." "Wait a bit or try another external site."

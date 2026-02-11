@@ -375,7 +375,7 @@ if (-not (Get-Command tracert -ErrorAction SilentlyContinue)) {
     if ($routerSuspect) {
         Write-ResultAndExit -Code 30 -Level FAIL -Summary "Your router responds, but internet is still down." -NextStep "Check WAN cable to wall port and router internet settings."
     }
-    Write-ResultAndExit -Code 30 -Level FAIL -Summary "Gateway responds, but internet is still down." -NextStep "Likely room uplink or campus backend issue. Contact campus IT."
+    Write-ResultAndExit -Code 30 -Level FAIL -Summary "Gateway responds, but internet is still down." -NextStep "Likely room uplink or campus backend issue. Contact CCN and fill complaint form."
 }
 
 $traceLines = tracert -d -h $MaxHops -w 800 $TargetIcmp 2>$null
@@ -393,7 +393,7 @@ if (-not $hop2 -or $hop2 -match "\*\s+\*\s+\*") {
     if ($routerSuspect) {
         Write-ResultAndExit -Code 21 -Level FAIL -Summary "Your router is reachable, but its uplink likely has a problem." -NextStep "Reconnect WAN cable from router to wall and test again."
     }
-    Write-ResultAndExit -Code 21 -Level FAIL -Summary "Local gateway works, but campus/backend uplink may be down." -NextStep "Report this to campus IT with this result."
+    Write-ResultAndExit -Code 21 -Level FAIL -Summary "Local gateway works, but campus/backend uplink may be down." -NextStep "Report this to CCN and fill complaint form."
 }
 
 Write-ResultAndExit -Code 22 -Level WARN -Summary "Local network is okay; issue is likely upstream (ISP/remote service)." -NextStep "Wait a bit or try another external site."
